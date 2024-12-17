@@ -1,29 +1,31 @@
 # language-server-mcp MCP Server
 
-A Model Context Protocol server
+A Model Context Protocol (MCP) server providing language support for code editing.
 
-This is a TypeScript-based MCP server that implements a simple notes system. It demonstrates core MCP concepts by providing:
+This is a TypeScript-based MCP server designed to enhance code editing experiences by providing features such as hover information, code completion, and diagnostics. It demonstrates core MCP concepts by providing:
 
-- Resources representing text notes with URIs and metadata
-- Tools for creating new notes
-- Prompts for generating summaries of notes
+- Language-specific tools for code analysis and manipulation
+- Integration with the Model Context Protocol for seamless communication
 
 ## Features
 
-### Resources
-- List and access notes via `note://` URIs
-- Each note has a title, content and metadata
-- Plain text mime type for simple content access
+### Language Support
+- Provides hover information for symbols in code
+- Offers code completion suggestions
+- Reports diagnostic information (errors, warnings)
+- Only tested with typescript, theoretically should support Python. Would love to add additional language servers or be more agnostic if possible.
+
+### MCP Integration
+- Implements the MCP protocol for communication with clients
+- Exposes language features as MCP tools
 
 ### Tools
-- `create_note` - Create new text notes
-  - Takes title and content as required parameters
-  - Stores note in server state
-
-### Prompts
-- `summarize_notes` - Generate a summary of all stored notes
-  - Includes all note contents as embedded resources
-  - Returns structured prompt for LLM summarization
+- `get_hover`: Get hover information for a position in a document
+  - Takes languageId, filePath, content, line, and character as required parameters
+- `get_completions`: Get completion suggestions for a position in a document
+  - Takes languageId, filePath, content, line, and character as required parameters
+- `get_diagnostics`: Get diagnostic information for a document
+  - Takes languageId, filePath, and content as required parameters
 
 ## Development
 
