@@ -22,11 +22,10 @@ import {
   PublishDiagnosticsParams,
   TextDocumentIdentifier,
   TextDocumentItem,
-  TextDocumentSyncKind,
 } from 'vscode-languageserver-protocol';
-import { spawn } from 'child_process';
-import { join } from 'path';
-import { writeFileSync, mkdirSync } from 'fs';
+import * as childProcess from 'child_process';
+import { dirname, join, relative, isAbsolute } from 'path';
+import { mkdirSync, existsSync, readFileSync } from 'fs';
 
 interface LanguageServerConfig {
   command: string;
@@ -35,8 +34,14 @@ interface LanguageServerConfig {
 
 interface LanguageServerInstance {
   connection: MessageConnection;
-  process: ReturnType<typeof spawn>;
+  process: ReturnType<typeof childProcess.spawn>;
   workspaceRoot: string;
+}
+
+interface ProjectConfig {
+  dependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
+  [key: string]: any;
 }
 
 class LanguageServerMCP {
@@ -48,7 +53,7 @@ class LanguageServerMCP {
     this.server = new Server(
       {
         name: 'language-server-mcp',
-        version: '0.1.0',
+        version: '0.2.0',
       },
       {
         capabilities: {
@@ -81,39 +86,41 @@ class LanguageServerMCP {
     await this.server.close();
   }
 
-  private setupVirtualWorkspace(languageId: string): string {
-    const workspaceRoot = join('/tmp', `mcp-${languageId}-workspace-${Date.now()}`);
-    mkdirSync(workspaceRoot, { recursive: true });
-
-    if (languageId === 'typescript') {
-      // Create tsconfig.json
-      const tsconfig = {
-        compilerOptions: {
-          target: "es2020",
-          module: "commonjs",
-          strict: true,
-          esModuleInterop: true,
-          skipLibCheck: true,
-          forceConsistentCasingInFileNames: true,
-          rootDir: "src",
-          outDir: "dist"
-        },
-        include: ["src/**/*"],
-        exclude: ["node_modules"]
-      };
-      writeFileSync(join(workspaceRoot, 'tsconfig.json'), JSON.stringify(tsconfig, null, 2));
-      mkdirSync(join(workspaceRoot, 'src'), { recursive: true });
-    }
-
-    return workspaceRoot;
+  private getServerKey(languageId: string, projectRoot?: string): string {
+    return `${languageId}:${projectRoot || 'default'}`;
   }
 
-  private async getOrCreateServer(languageId: string): Promise<LanguageServerInstance> {
-    console.log(`[getOrCreateServer] Request for ${languageId} server`);
+  private getLanguageServerConfig(languageId: string): LanguageServerConfig | undefined {
+    console.log(`[getLanguageServerConfig] Getting config for ${languageId}`);
+    const configStr = process.env[`${languageId.toUpperCase()}_SERVER`];
+    console.log(`[getLanguageServerConfig] Raw config for ${languageId}:`, configStr);
     
-    if (this.languageServers.has(languageId)) {
-      console.log(`[getOrCreateServer] Returning existing ${languageId} server`);
-      return this.languageServers.get(languageId)!;
+    if (!configStr) {
+      console.log(`[getLanguageServerConfig] No config found for ${languageId}`);
+      return undefined;
+    }
+
+    try {
+      const config = JSON.parse(configStr);
+      console.log(`[getLanguageServerConfig] Parsed config for ${languageId}:`, config);
+      return config;
+    } catch (error) {
+      if (error instanceof Error) {
+        console.error(`[getLanguageServerConfig] Invalid config for ${languageId}:`, error.message);
+      } else {
+        console.error(`[getLanguageServerConfig] Invalid config for ${languageId}:`, error);
+      }
+      return undefined;
+    }
+  }
+
+  private async getOrCreateServer(languageId: string, projectRoot?: string): Promise<LanguageServerInstance> {
+    const serverKey = this.getServerKey(languageId, projectRoot);
+    console.log(`[getOrCreateServer] Request for ${serverKey}`);
+    
+    if (this.languageServers.has(serverKey)) {
+      console.log(`[getOrCreateServer] Returning existing ${serverKey} server`);
+      return this.languageServers.get(serverKey)!;
     }
 
     const config = this.getLanguageServerConfig(languageId);
@@ -124,19 +131,19 @@ class LanguageServerMCP {
       );
     }
 
-    console.log(`[getOrCreateServer] Spawning ${languageId} server:`, config);
-    const serverProcess = spawn(config.command, config.args);
+    console.log(`[getOrCreateServer] Spawning ${serverKey} server:`, config);
+    const serverProcess = childProcess.spawn(config.command, config.args);
 
     serverProcess.on('error', (error) => {
-      console.error(`[${languageId} process] Error:`, error);
+      console.error(`[${serverKey} process] Error:`, error);
     });
 
     serverProcess.stderr.on('data', (data) => {
-      console.error(`[${languageId} stderr]`, data.toString());
+      console.error(`[${serverKey} stderr]`, data.toString());
     });
 
     // Create message connection
-    console.log(`[getOrCreateServer] Creating message connection for ${languageId}`);
+    console.log(`[getOrCreateServer] Creating message connection for ${serverKey}`);
     const connection = createMessageConnection(
       new StreamMessageReader(serverProcess.stdout),
       new StreamMessageWriter(serverProcess.stdin)
@@ -144,28 +151,28 @@ class LanguageServerMCP {
 
     // Debug logging for messages
     connection.onNotification((method, params) => {
-      console.log(`[${languageId}] Notification received:`, method, params);
+      console.log(`[${serverKey}] Notification received:`, method, params);
     });
 
     connection.onRequest((method, params) => {
-      console.log(`[${languageId}] Request received:`, method, params);
+      console.log(`[${serverKey}] Request received:`, method, params);
     });
 
-    // Set up virtual workspace
-    const workspaceRoot = this.setupVirtualWorkspace(languageId);
+    // If projectRoot is not provided, default to current working directory
+    const actualRoot = projectRoot && existsSync(projectRoot) ? projectRoot : process.cwd();
 
     // Initialize connection
-    console.log(`[getOrCreateServer] Starting connection for ${languageId}`);
+    console.log(`[getOrCreateServer] Starting connection for ${serverKey}`);
     connection.listen();
 
     // Initialize language server
-    console.log(`[getOrCreateServer] Initializing ${languageId} server`);
+    console.log(`[getOrCreateServer] Initializing ${serverKey} server`);
     try {
       const initializeResult = await connection.sendRequest('initialize', {
         processId: process.pid,
-        rootUri: `file://${workspaceRoot}`,
+        rootUri: `file://${actualRoot}`,
         workspaceFolders: [{
-          uri: `file://${workspaceRoot}`,
+          uri: `file://${actualRoot}`,
           name: `${languageId}-workspace`
         }],
         capabilities: {
@@ -234,11 +241,11 @@ class LanguageServerMCP {
         initializationOptions: null,
       } as InitializeParams);
 
-      console.log(`[getOrCreateServer] Initialize result for ${languageId}:`, initializeResult);
+      console.log(`[getOrCreateServer] Initialize result for ${serverKey}:`, initializeResult);
       await connection.sendNotification('initialized');
-      console.log(`[getOrCreateServer] Sent initialized notification for ${languageId}`);
+      console.log(`[getOrCreateServer] Sent initialized notification for ${serverKey}`);
 
-      // Configure server if needed
+      // Optional: send workspace configuration changes if needed
       if (languageId === 'typescript') {
         await connection.sendNotification('workspace/didChangeConfiguration', {
           settings: {
@@ -258,7 +265,7 @@ class LanguageServerMCP {
         });
       }
     } catch (error) {
-      console.error(`[getOrCreateServer] Failed to initialize ${languageId} server:`, error);
+      console.error(`[getOrCreateServer] Failed to initialize ${serverKey} server:`, error);
       throw error;
     }
 
@@ -266,40 +273,16 @@ class LanguageServerMCP {
     connection.onNotification(
       'textDocument/publishDiagnostics',
       (params: PublishDiagnosticsParams) => {
-        console.log(`[${languageId}] Received diagnostics:`, params);
+        console.log(`[${serverKey}] Received diagnostics:`, params);
         const listeners = this.diagnosticsListeners.get(params.uri) || [];
         listeners.forEach(listener => listener(params));
       }
     );
 
-    const server = { connection, process: serverProcess, workspaceRoot };
-    this.languageServers.set(languageId, server);
-    console.log(`[getOrCreateServer] Successfully created ${languageId} server`);
+    const server = { connection, process: serverProcess, workspaceRoot: actualRoot };
+    this.languageServers.set(serverKey, server);
+    console.log(`[getOrCreateServer] Successfully created ${serverKey} server`);
     return server;
-  }
-
-  private getLanguageServerConfig(languageId: string): LanguageServerConfig | undefined {
-    console.log(`[getLanguageServerConfig] Getting config for ${languageId}`);
-    const configStr = process.env[`${languageId.toUpperCase()}_SERVER`];
-    console.log(`[getLanguageServerConfig] Raw config for ${languageId}:`, configStr);
-    
-    if (!configStr) {
-      console.log(`[getLanguageServerConfig] No config found for ${languageId}`);
-      return undefined;
-    }
-
-    try {
-      const config = JSON.parse(configStr);
-      console.log(`[getLanguageServerConfig] Parsed config for ${languageId}:`, config);
-      return config;
-    } catch (error) {
-      if (error instanceof Error) {
-        console.error(`[getLanguageServerConfig] Invalid config for ${languageId}:`, error.message);
-      } else {
-        console.error(`[getLanguageServerConfig] Invalid config for ${languageId}:`, error);
-      }
-      return undefined;
-    }
   }
 
   private setupTools() {
@@ -311,13 +294,32 @@ class LanguageServerMCP {
           inputSchema: {
             type: 'object',
             properties: {
-              languageId: { type: 'string' },
-              filePath: { type: 'string' },
-              content: { type: 'string' },
-              line: { type: 'number' },
-              character: { type: 'number' },
+              languageId: { 
+                type: 'string',
+                description: 'The language identifier (e.g., "typescript", "javascript")'
+              },
+              filePath: { 
+                type: 'string',
+                description: 'Absolute or relative path to the source file'
+              },
+              content: { 
+                type: 'string',
+                description: 'The current content of the file'
+              },
+              line: { 
+                type: 'number',
+                description: 'Zero-based line number for hover position'
+              },
+              character: { 
+                type: 'number',
+                description: 'Zero-based character offset for hover position'
+              },
+              projectRoot: { 
+                type: 'string',
+                description: 'Important: Root directory of the project for resolving imports and node_modules where the tsconfig.json or jsconfig.json is located'
+              },
             },
-            required: ['languageId', 'filePath', 'content', 'line', 'character'],
+            required: ['languageId', 'filePath', 'content', 'line', 'character', 'projectRoot'],
           },
         },
         {
@@ -326,13 +328,32 @@ class LanguageServerMCP {
           inputSchema: {
             type: 'object',
             properties: {
-              languageId: { type: 'string' },
-              filePath: { type: 'string' },
-              content: { type: 'string' },
-              line: { type: 'number' },
-              character: { type: 'number' },
+              languageId: { 
+                type: 'string',
+                description: 'The language identifier (e.g., "typescript", "javascript")'
+              },
+              filePath: { 
+                type: 'string',
+                description: 'Absolute or relative path to the source file'
+              },
+              content: { 
+                type: 'string',
+                description: 'The current content of the file'
+              },
+              line: { 
+                type: 'number',
+                description: 'Zero-based line number for completion position'
+              },
+              character: { 
+                type: 'number',
+                description: 'Zero-based character offset for completion position'
+              },
+              projectRoot: { 
+                type: 'string',
+                description: 'Important: Root directory of the project for resolving imports and node_modules where the tsconfig.json or jsconfig.json is located'
+              },
             },
-            required: ['languageId', 'filePath', 'content', 'line', 'character'],
+            required: ['languageId', 'filePath', 'content', 'line', 'character', 'projectRoot'],
           },
         },
         {
@@ -341,11 +362,24 @@ class LanguageServerMCP {
           inputSchema: {
             type: 'object',
             properties: {
-              languageId: { type: 'string' },
-              filePath: { type: 'string' },
-              content: { type: 'string' },
+              languageId: { 
+                type: 'string',
+                description: 'The language identifier (e.g., "typescript", "javascript")'
+              },
+              filePath: { 
+                type: 'string',
+                description: 'Absolute or relative path to the source file'
+              },
+              content: { 
+                type: 'string',
+                description: 'The current content of the file'
+              },
+              projectRoot: { 
+                type: 'string',
+                description: 'Important: Root directory of the project for resolving imports and node_modules where the tsconfig.json or jsconfig.json is located'
+              },
             },
-            required: ['languageId', 'filePath', 'content'],
+            required: ['languageId', 'filePath', 'content', 'projectRoot'],
           },
         },
       ],
@@ -385,13 +419,21 @@ class LanguageServerMCP {
   }
 
   private async handleGetHover(args: any): Promise<any> {
-    const { languageId, filePath, content, line, character } = args;
+    const { languageId, filePath, content, line, character, projectRoot } = args;
     console.log(`[handleGetHover] Processing request for ${languageId}`);
     
-    const server = await this.getOrCreateServer(languageId);
-    const uri = `file://${join(server.workspaceRoot, 'src', filePath)}`;
+    const server = await this.getOrCreateServer(languageId, projectRoot);
+    const actualRoot = server.workspaceRoot;
 
-    // Send document to language server
+    const absolutePath = isAbsolute(filePath) ? filePath : join(actualRoot, filePath);
+    const uri = `file://${absolutePath}`;
+
+    // Ensure directory exists (for languages that may require file presence)
+    const dir = dirname(absolutePath);
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true });
+    }
+
     const textDocument: TextDocumentItem = {
       uri,
       languageId,
@@ -437,13 +479,21 @@ class LanguageServerMCP {
   }
 
   private async handleGetCompletions(args: any): Promise<any> {
-    const { languageId, filePath, content, line, character } = args;
+    const { languageId, filePath, content, line, character, projectRoot } = args;
     console.log(`[handleGetCompletions] Processing request for ${languageId}`);
     
-    const server = await this.getOrCreateServer(languageId);
-    const uri = `file://${join(server.workspaceRoot, 'src', filePath)}`;
+    const server = await this.getOrCreateServer(languageId, projectRoot);
+    const actualRoot = server.workspaceRoot;
 
-    // Send document to language server
+    const absolutePath = isAbsolute(filePath) ? filePath : join(actualRoot, filePath);
+    const uri = `file://${absolutePath}`;
+
+    // Ensure directory exists
+    const dir = dirname(absolutePath);
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true });
+    }
+
     const textDocument: TextDocumentItem = {
       uri,
       languageId,
@@ -494,13 +544,21 @@ class LanguageServerMCP {
   }
 
   private async handleGetDiagnostics(args: any): Promise<any> {
-    const { languageId, filePath, content } = args;
+    const { languageId, filePath, content, projectRoot } = args;
     console.log(`[handleGetDiagnostics] Processing request for ${languageId}`);
     
-    const server = await this.getOrCreateServer(languageId);
-    const uri = `file://${join(server.workspaceRoot, 'src', filePath)}`;
+    const server = await this.getOrCreateServer(languageId, projectRoot);
+    const actualRoot = server.workspaceRoot;
 
-    // Send document to language server
+    const absolutePath = isAbsolute(filePath) ? filePath : join(actualRoot, filePath);
+    const uri = `file://${absolutePath}`;
+
+    // Ensure directory exists
+    const fileDir = dirname(absolutePath);
+    if (!existsSync(fileDir)) {
+      mkdirSync(fileDir, { recursive: true });
+    }
+
     const textDocument: TextDocumentItem = {
       uri,
       languageId,
@@ -510,7 +568,6 @@ class LanguageServerMCP {
 
     console.log(`[handleGetDiagnostics] Setting up diagnostics listener for ${uri}`);
     return new Promise((resolve) => {
-      // Set up one-time diagnostics listener
       const listeners = this.diagnosticsListeners.get(uri) || [];
       const listener = (params: PublishDiagnosticsParams) => {
         console.log(`[handleGetDiagnostics] Received diagnostics for ${uri}:`, params);
@@ -567,3 +624,5 @@ class LanguageServerMCP {
 
 const server = new LanguageServerMCP();
 server.run().catch(console.error);
+
+export { LanguageServerMCP };
