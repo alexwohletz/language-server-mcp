@@ -7,6 +7,8 @@ This is a TypeScript-based MCP server designed to enhance code editing experienc
 - Language-specific tools for code analysis and manipulation
 - Integration with the Model Context Protocol for seamless communication
 
+<a href="https://glama.ai/mcp/servers/t4zp3tna7x"><img width="380" height="200" src="https://glama.ai/mcp/servers/t4zp3tna7x/badge" alt="language-server-mcp MCP server" /></a>
+
 ## Features
 
 ### Language Support
